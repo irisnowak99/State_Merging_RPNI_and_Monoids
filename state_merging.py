@@ -14,6 +14,9 @@ from pathlib import Path
 import itertools
 from typing import Literal
 from random import shuffle
+from collections import namedtuple
+
+LearningConfig = namedtuple('LearningConfig', ['algorithm', 'consistency_type'])
 
 # ---------------- FUNCTIONS ----------------
 def compute_prefix_states(automaton):
@@ -315,6 +318,35 @@ def shortest_accepting_prefix_and_suffix_for_monoids(automaton, source_state):
     return None, None, None
 
 
+def check_minimal_dfa(automaton):
+    """
+    Raises ValueError if the automaton has equivalent states (is not minimal).
+
+    :param automaton: automaton to check
+    """
+
+    prefix_states = compute_prefix_states(automaton)
+    states = sorted(list(prefix_states), key=lambda t: hp.canonical_word_key(t, automaton.alphabet))
+
+    for i, p in enumerate(states):
+        for q in states[i+1:]:
+
+            if (p in automaton.accepting) != (q in automaton.accepting):
+                continue
+
+            automaton_p = copy.deepcopy(automaton)
+            automaton_p.set_initial(p)
+            automaton_q = copy.deepcopy(automaton)
+            automaton_q.set_initial(q)
+
+            product = compute_product_automaton(automaton_p, automaton_q, acceptance_type='one_accepting')
+            start = '{' + p + ',' + q + '}'
+            _, accepting_state = shortest_accepting_suffix(product, start)
+
+            if accepting_state is None:
+                raise ValueError('automaton is not minimal: states \'' + p + '\' and \'' + q + '\' are equivalent')
+
+
 def compute_rpni_minimal_representatives_for_dfa(automaton, cover_sink=False, has_lr_alphabet=False):
     """
     Compute minimal representatives MR(L) and minimal transition representatives MTR(L) for a minimal automaton 
@@ -390,6 +422,9 @@ def compute_rpni_complete_samples_for_dfa(automaton, cover_sink=False, has_lr_al
 
     :return: tuple of negative sample and positive sample set
     """
+
+    # expects minimal automaton
+    check_minimal_dfa(automaton)
 
     pos_samples, neg_samples = set(), set()
     mr_l, mtr_l = compute_rpni_minimal_representatives_for_dfa(automaton, cover_sink=cover_sink, has_lr_alphabet=has_lr_alphabet)
@@ -551,6 +586,9 @@ def compute_rpni_complete_samples_for_monoid(automaton, cover_sink=False):
 
     :return: tuple of negative sample and positive sample set
     """
+
+    # expects minimal automaton
+    check_minimal_dfa(automaton)
 
     # reconstruct alphabet without left/right transitions
     true_alphabet = hp.get_normal_alphabet_from_lr(automaton.alphabet)
@@ -888,7 +926,7 @@ def make_infix_automaton(positive_samples, alphabet, negative_samples=[]):
     return infix_automaton
 
 
-def merge_states(automaton, state1, state2):
+def merge_states(automaton, state1, state2, follow_up_merges=True):
     """
     Merge two automaton states according to merging algorithm strategies:
     After merging check if new states and transitions imply other states need to be merged as well,
@@ -898,6 +936,7 @@ def merge_states(automaton, state1, state2):
     :param automaton: automaton
     :param state1: part of initial state pair to merge
     :param state2: part of initial state pair to merge
+    :param follow_up_merges: if False, skip follow-up merges caused by non-determinism (default: True)
 
     :return: automaton after merges, set of merge tuples
     """
@@ -982,6 +1021,8 @@ def merge_states(automaton, state1, state2):
                     else:
                         future_merges.add((transition2[2], transition[2]))
 
+        if not follow_up_merges:
+            break
 
         automaton_prestep = copy.deepcopy(automaton_poststep)
 
@@ -1098,7 +1139,7 @@ def get_left_cayley_graph_from_bdfa(automaton):
     return cayley
 
 
-def merge_with_rpni_order(automaton, neg_samples, path='', is_bdfa=False, has_lr_alphabet=False):
+def merge_with_rpni_order(automaton, neg_samples, path='', is_bdfa=False, has_lr_alphabet=False, follow_up_merges=True):
     """
     Executes rpni algorithm in automaton using negative samples and accepting/rejecting states, saves detailed output and rendered automaton steps
 
@@ -1107,6 +1148,7 @@ def merge_with_rpni_order(automaton, neg_samples, path='', is_bdfa=False, has_lr
     :param path: file path to save output under
     :param is_bdfa: if input is a BDFA
     :param has_lr_alphabet: if input is over LR alphabet (relevant for sorting)
+    :param follow_up_merges: if False, skip follow-up merges caused by non-determinism (default: True)
 
     :return: automaton after merges
     """
@@ -1152,13 +1194,18 @@ def merge_with_rpni_order(automaton, neg_samples, path='', is_bdfa=False, has_lr
                 break
             
             # merge pair
-            new_automaton, merges, accepting_and_rejecting = merge_states(automaton, state_i, state_j)
+            new_automaton, merges, accepting_and_rejecting = merge_states(automaton, state_i, state_j, follow_up_merges=follow_up_merges)
 
             # check if negative sample is accepted
             neg_sample_accepted = None
             for neg_sample in neg_samples:
 
-                result = new_automaton.run(neg_sample, verbose=False) if not is_bdfa else new_automaton.run_as_bdfa(neg_sample, verbose=False)
+                if is_bdfa:
+                    result = new_automaton.run_as_bdfa(neg_sample, verbose=False)
+                elif not follow_up_merges:
+                    result = new_automaton.run_nfa(neg_sample, verbose=False)
+                else:
+                    result = new_automaton.run(neg_sample, verbose=False)
                 if result:
                     neg_sample_accepted = neg_sample
                     break
@@ -1211,7 +1258,7 @@ def merge_with_rpni_order(automaton, neg_samples, path='', is_bdfa=False, has_lr
     automaton.name = 'minimal'
     return automaton
 
-def merge_with_random_order(automaton, neg_samples, path='', is_bdfa=False):
+def merge_with_random_order(automaton, neg_samples, path='', is_bdfa=False, follow_up_merges=True):
     """
     Executes state merging algorithm with random merge order using negative samples and accepting/rejecting, saves detailed output and rendered automaton steps
 
@@ -1219,6 +1266,7 @@ def merge_with_random_order(automaton, neg_samples, path='', is_bdfa=False):
     :param neg_samples: list of negative samples
     :param path: file path to save output under
     :param is_bdfa: if input is a BDFA
+    :param follow_up_merges: if False, skip follow-up merges caused by non-determinism (default: True)
 
     :return: automaton after random merges
     """
@@ -1245,7 +1293,7 @@ def merge_with_random_order(automaton, neg_samples, path='', is_bdfa=False):
                 continue
             
             # merge pair
-            new_automaton, merges, accepting_and_rejecting = merge_states(automaton, state_i, state_j)
+            new_automaton, merges, accepting_and_rejecting = merge_states(automaton, state_i, state_j, follow_up_merges=follow_up_merges)
 
             # prepare output
             index_i = str(i).zfill(3)
@@ -1269,7 +1317,12 @@ def merge_with_random_order(automaton, neg_samples, path='', is_bdfa=False):
             neg_sample_accepted = None
             for neg_sample in neg_samples:
 
-                result = new_automaton.run(neg_sample, verbose=False) if not is_bdfa else new_automaton.run_as_bdfa(neg_sample, verbose=False)
+                if is_bdfa:
+                    result = new_automaton.run_as_bdfa(neg_sample, verbose=False)
+                elif not follow_up_merges:
+                    result = new_automaton.run_nfa(neg_sample, verbose=False)
+                else:
+                    result = new_automaton.run(neg_sample, verbose=False)
                 if result:
                     neg_sample_accepted = neg_sample
                     break
@@ -1331,7 +1384,7 @@ def _summarize_dir(directory):
                 summary += '\n-------------------------------\n\n' + f.read()
     return summary
 
-def learn_dfa(alphabet, pos_samples, neg_samples, state_merging_algorithm, consistency_type: Literal['type_1', 'type_2'], name=''):
+def learn_dfa(alphabet, pos_samples, neg_samples, state_merging_algorithm, consistency_type: Literal['type_2', 'type_1'], name='', follow_up_merges=True):
     """
     Learns a DFA based on positive and negative samples of a language, saves detailed output and rendered automaton steps
 
@@ -1339,8 +1392,9 @@ def learn_dfa(alphabet, pos_samples, neg_samples, state_merging_algorithm, consi
     :param pos_samples: list of words to accept
     :param neg_samples: list of words to reject
     :param state_merging_algorithm: used state merging algorithm
-    :param consistency_type: type of consistency checks (type_1 is accepting/rejecting states, type_2 is running negative samples)
+    :param consistency_type: type of consistency checks (type_2 is accepting/rejecting states, type_1 is running negative samples)
     :param name: name of language
+    :param follow_up_merges: if False, skip follow-up merges caused by non-determinism (default: True)
 
     :return: learned DFA
     """
@@ -1366,27 +1420,27 @@ def learn_dfa(alphabet, pos_samples, neg_samples, state_merging_algorithm, consi
             state_merging_algorithm.__name__,
             '\n',
             'CONSISTENCY CHECKS:',
-            'run negative samples after merge' if consistency_type == 'type_2' else 'disallow merging accepting and rejecting states'],
+            'run negative samples after merge' if consistency_type == 'type_1' else 'disallow merging accepting and rejecting states'],
         output_dir + '_input.txt'
     )
 
     # distinguish consistency types by passing the negative samples to different functions
     negative_samples_pta, negative_samples_merging = [], []
-    if consistency_type == 'type_1':
-        negative_samples_pta, negative_samples_merging = neg_samples, []
     if consistency_type == 'type_2':
+        negative_samples_pta, negative_samples_merging = neg_samples, []
+    if consistency_type == 'type_1':
         negative_samples_pta, negative_samples_merging = [], neg_samples
 
     # learn dfa
     prefix_automaton = make_prefix_automaton(positive_samples=pos_samples, alphabet=alphabet, negative_samples=negative_samples_pta)
-    learned_dfa = state_merging_algorithm(automaton=prefix_automaton, neg_samples=negative_samples_merging, path=output_dir)
+    learned_dfa = state_merging_algorithm(automaton=prefix_automaton, neg_samples=negative_samples_merging, path=output_dir, follow_up_merges=follow_up_merges)
 
     hp.save_to_text_file([_summarize_dir(output_dir)], output_dir + '_summary.txt')
 
     print('LEARNING DFA SAVED UNDER ' + output_dir)
     return learned_dfa
 
-def learn_monoid(alphabet, pos_samples, neg_samples, state_merging_algorithm, consistency_type: Literal['type_1', 'type_2'], name=''):
+def learn_monoid(alphabet, pos_samples, neg_samples, state_merging_algorithm, consistency_type: Literal['type_2', 'type_1'], name='', follow_up_merges=True):
     """
     Learns a monoid based on positive and negative samples of a language, saves detailed output and rendered automaton steps
 
@@ -1394,8 +1448,9 @@ def learn_monoid(alphabet, pos_samples, neg_samples, state_merging_algorithm, co
     :param pos_samples: list of words to accept
     :param neg_samples: list of words to reject
     :param state_merging_algorithm: used state merging algorithm
-    :param consistency_type: type of consistency checks (type_1 is accepting/rejecting states, type_2 is running negative samples)
+    :param consistency_type: type of consistency checks (type_2 is accepting/rejecting states, type_1 is running negative samples)
     :param name: name of language
+    :param follow_up_merges: if False, skip follow-up merges caused by non-determinism (default: True)
 
     :return: minimal monoid
     """
@@ -1421,20 +1476,20 @@ def learn_monoid(alphabet, pos_samples, neg_samples, state_merging_algorithm, co
             state_merging_algorithm.__name__,
             '\n',
             'CONSISTENCY CHECKS:',
-            'run negative samples after merge' if consistency_type == 'type_2' else 'disallow merging accepting and rejecting states'],
+            'run negative samples after merge' if consistency_type == 'type_1' else 'disallow merging accepting and rejecting states'],
         output_dir + '_input.txt'
     )
 
     # distinguish consistency types by passing the negative samples to different functions
     negative_samples_pta, negative_samples_merging = [], []
-    if consistency_type == 'type_1':
-        negative_samples_pta, negative_samples_merging = neg_samples, []
     if consistency_type == 'type_2':
+        negative_samples_pta, negative_samples_merging = neg_samples, []
+    if consistency_type == 'type_1':
         negative_samples_pta, negative_samples_merging = [], neg_samples
 
     # learn monoid
     bdfa = make_infix_automaton(positive_samples=pos_samples, alphabet=alphabet, negative_samples=negative_samples_pta)
-    learned_monoid = state_merging_algorithm(automaton=bdfa, neg_samples=negative_samples_merging, path=output_dir, is_bdfa=True)
+    learned_monoid = state_merging_algorithm(automaton=bdfa, neg_samples=negative_samples_merging, path=output_dir, is_bdfa=True, follow_up_merges=follow_up_merges)
     cayley = get_right_cayley_graph_from_bdfa(learned_monoid)
     cayley.draw(include_sink=False, path=output_dir + 'result_cayley', verbose=False)
 
@@ -1444,7 +1499,7 @@ def learn_monoid(alphabet, pos_samples, neg_samples, state_merging_algorithm, co
     return learned_monoid
 
 
-def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm_dfa, consistency_type_dfa: Literal['type_1', 'type_2'], state_merging_algorithm_monoid, consistency_type_monoid: Literal['type_1', 'type_2'], name=''):
+def compare_learning(alphabet, pos_samples, neg_samples, dfa_config: LearningConfig, monoid_config: LearningConfig, name=''):
     """
     Learns a DFA and a monoid based on positive and negative samples of a language,
     saves detailed output and rendered automaton steps of both versions
@@ -1452,10 +1507,8 @@ def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm
     :param alphabet: language alphabet
     :param pos_samples: list of words to accept
     :param neg_samples: list of words to reject
-    :param state_merging_algorithm_dfa: state merging algorithm to use for DFA learning
-    :param consistency_type_dfa: type of consistency checks for DFA learning (type_1 is accepting/rejecting states, type_2 is running negative samples)
-    :param state_merging_algorithm_monoid: state merging algorithm to use for monoid learning
-    :param consistency_type_monoid: type of consistency checks for monoid learning (type_1 is accepting/rejecting states, type_2 is running negative samples)
+    :param dfa_config: LearningConfig(algorithm, consistency_type) for DFA learning
+    :param monoid_config: LearningConfig(algorithm, consistency_type) for monoid learning
     :param name: name of language
 
     """
@@ -1478,16 +1531,16 @@ def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm
             str(neg_samples), 
             '\n\n',
             'STATE MERGING ALGORITHM (DFA):',
-            state_merging_algorithm_dfa.__name__,
+            dfa_config.algorithm.__name__,
             '\n',
             'CONSISTENCY CHECKS (DFA):',
-            'run negative samples after merge' if consistency_type_dfa == 'type_2' else 'disallow merging accepting and rejecting states',
+            'run negative samples after merge' if dfa_config.consistency_type == 'type_1' else 'disallow merging accepting and rejecting states',
             '\n\n',
             'STATE MERGING ALGORITHM (MONOID):',
-            state_merging_algorithm_monoid.__name__,
+            monoid_config.algorithm.__name__,
             '\n',
             'CONSISTENCY CHECKS (MONOID):',
-            'run negative samples after merge' if consistency_type_monoid == 'type_2' else 'disallow merging accepting and rejecting states'],
+            'run negative samples after merge' if monoid_config.consistency_type == 'type_1' else 'disallow merging accepting and rejecting states'],
         output_dir + '_input.txt'
     )
 
@@ -1496,14 +1549,14 @@ def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm
 
     # distinguish consistency types by passing the negative samples to different functions
     negative_samples_pta, negative_samples_merging = [], []
-    if consistency_type_dfa == 'type_1':
+    if dfa_config.consistency_type == 'type_2':
         negative_samples_pta, negative_samples_merging = neg_samples, []
-    if consistency_type_dfa == 'type_2':
+    if dfa_config.consistency_type == 'type_1':
         negative_samples_pta, negative_samples_merging = [], neg_samples
 
     # learn dfa
     prefix_automaton = make_prefix_automaton(positive_samples=pos_samples, alphabet=alphabet, negative_samples=negative_samples_pta)
-    learned_dfa = state_merging_algorithm_dfa(automaton=prefix_automaton, neg_samples=negative_samples_merging, path=output_dir + subdir_dfa)
+    learned_dfa = dfa_config.algorithm(automaton=prefix_automaton, neg_samples=negative_samples_merging, path=output_dir + subdir_dfa)
 
     hp.save_to_text_file([_summarize_dir(output_dir + subdir_dfa)], output_dir + subdir_dfa + '_summary.txt')
 
@@ -1512,14 +1565,14 @@ def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm
 
     # distinguish consistency types by passing the negative samples to different functions
     negative_samples_pta, negative_samples_merging = [], []
-    if consistency_type_monoid == 'type_1':
+    if monoid_config.consistency_type == 'type_2':
         negative_samples_pta, negative_samples_merging = neg_samples, []
-    if consistency_type_monoid == 'type_2':
+    if monoid_config.consistency_type == 'type_1':
         negative_samples_pta, negative_samples_merging = [], neg_samples
 
     # learn monoid
     bdfa = make_infix_automaton(positive_samples=pos_samples, alphabet=alphabet, negative_samples=negative_samples_pta)
-    learned_monoid = state_merging_algorithm_monoid(automaton=bdfa, neg_samples=negative_samples_merging, path=output_dir + subdir_monoid, is_bdfa=True)
+    learned_monoid = monoid_config.algorithm(automaton=bdfa, neg_samples=negative_samples_merging, path=output_dir + subdir_monoid, is_bdfa=True)
     right_cayley = get_right_cayley_graph_from_bdfa(learned_monoid)
     right_cayley.draw(include_sink=False, path=output_dir + subdir_monoid + 'result_right_cayley', verbose=False)
     left_cayley = get_left_cayley_graph_from_bdfa(learned_monoid)
@@ -1556,14 +1609,14 @@ def compare_learning(alphabet, pos_samples, neg_samples, state_merging_algorithm
 
     print('LEARNING COMPARISON SAVED UNDER ' + output_dir)
 
-def rpni_sample_transfer_from_dfa_to_monoid(alphabet, monoid_automaton, consistency_type: Literal['type_1', 'type_2'], name=''):
+def rpni_sample_transfer_from_dfa_to_monoid(alphabet, monoid_automaton, consistency_type: Literal['type_2', 'type_1'], name=''):
     """
     Generates RPNI complete samples for the given BDFA, maps those to monoid samples, then compares DFA learning with DFA samples
     and monoid learning with mapped samples.
 
     :param alphabet: language alphabet
     :param monoid_automaton: BDFA for L
-    :param consistency_type: type of consistency checks for learning (type_1 is accepting/rejecting states, type_2 is running negative samples)
+    :param consistency_type: type of consistency checks for learning (type_2 is accepting/rejecting states, type_1 is running negative samples)
     :param name: name of language
     """
 
@@ -1585,12 +1638,12 @@ def rpni_sample_transfer_from_dfa_to_monoid(alphabet, monoid_automaton, consiste
     monoid_automaton.draw(include_sink=True, path=output_dir + 'source_automaton', verbose=False)
 
     # get rpni complete samples for monoid
-    cover_sink = consistency_type == 'type_1'
+    cover_sink = consistency_type == 'type_2'
     pos_samples_dfa, neg_samples_dfa = compute_rpni_complete_samples_for_dfa(monoid_automaton, cover_sink=cover_sink, has_lr_alphabet=True)
 
     # learn dfa
     neg_samples_PTA, neg_samples_merge = [], neg_samples_dfa
-    if consistency_type == 'type_1':
+    if consistency_type == 'type_2':
         neg_samples_PTA, neg_samples_merge = neg_samples_dfa, []
 
     prefix_automaton = make_prefix_automaton(positive_samples=pos_samples_dfa, alphabet=complete_alphabet, negative_samples=neg_samples_PTA)
@@ -1626,16 +1679,16 @@ def rpni_sample_transfer_from_dfa_to_monoid(alphabet, monoid_automaton, consiste
             str(neg_samples_monoid),
             '\n',  
             'STATE MERGING ALGORITHM:',
-            'RPNI' + (' with sink samples' if consistency_type == 'type_1' else ''),
+            'RPNI' + (' with sink samples' if consistency_type == 'type_2' else ''),
             '\n'
             'CONSISTENCY CHECKS:',
-            ('run negative samples after merge' if consistency_type == 'type_2' else 'disallow merging accepting and rejecting states')], 
+            ('run negative samples after merge' if consistency_type == 'type_1' else 'disallow merging accepting and rejecting states')], 
         output_dir + '_input.txt'
     )
     
     # learn monoid
     neg_samples_PTA_monoid, neg_samples_merge_monoid = [], neg_samples_monoid
-    if consistency_type == 'type_1':
+    if consistency_type == 'type_2':
         neg_samples_PTA_monoid, neg_samples_merge_monoid = neg_samples_monoid, []
 
     bdfa = make_infix_automaton(positive_samples=pos_samples_monoid, alphabet=alphabet, negative_samples=neg_samples_PTA_monoid)

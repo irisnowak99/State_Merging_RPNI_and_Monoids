@@ -316,6 +316,32 @@ class Automaton:
 
         return result
 
+    def run_nfa(self, word, verbose=True):
+        """
+        Compute run of automaton on word with NFA semantics (any accepting path suffices).
+
+        :param word: string to compute run on
+        :param verbose: print result if True (default: True)
+
+        :return: True if any execution path accepts the word
+        """
+
+        current_states = {self.initial}
+        for letter in word:
+            next_states = set()
+            for state in current_states:
+                successors = {t[2] for t in self.transitions if t[0] == state and t[1] == letter}
+                next_states.update(successors if successors else {self.sink})
+            current_states = next_states
+
+        result = bool(current_states.intersection(self.accepting))
+
+        if verbose:
+            print('nfa run on "' + word + '" is ' + ('ACCEPTING' if result else 'REJECTING'))
+            print('---------------')
+
+        return result
+
     def run_and_return_state(self, word, verbose=True):
         """
         Compute run of automaton on word, return final state
